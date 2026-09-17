@@ -573,17 +573,66 @@ test("consolidation/sleep model routing: provider dropdowns from /llm-providers,
     "select changes must commit through the features PUT like the embed provider select"
   );
   assert.ok(
-    /curM && !mVals\.includes\(curM\) \? h\("option", \{ key: "current", value: curM \}, curM\) : null/.test(clientSource),
-    "a configured value missing from the provider's model list must survive as an extra option"
+    /curM && !mVals\.includes\(curM\) \? h\("option", \{ key: "current", value: curM \},\s*\n\s*mStale \? curM \+ t\("memory\.features\.routeStaleMark"\) : curM\) : null/.test(clientSource),
+    "a configured value missing from the provider's model list must survive as an extra option, marked when stale (issue #191)"
   );
   // 5. 双语 i18n 与样式
-  for (const key of ["routeFollowDefault", "modelTest", "modelTesting", "modelTestOk", "modelTestFail", "sleepModelHint"]) {
+  for (const key of ["routeFollowDefault", "modelTest", "modelTesting", "modelTestOk", "modelTestFail", "modelTestHint", "routeStaleMark", "routeStaleHint", "sleepModelHint"]) {
     const occurrences = clientSource.split(`"memory.features.${key}"`).length - 1;
     assert.ok(occurrences >= 2, `i18n key memory.features.${key} must exist in both zh and en (got ${occurrences})`);
   }
   assert.ok(
     clientSource.includes(".mneme-routeselect{width:240px;max-width:60%}"),
     "the route selects must share the string-input width budget"
+  );
+});
+
+// issue #191：级联下拉刻意保留不在列表里的旧值（不丢配置），但此前与正常
+// 选项无差别展示——切 Provider 后残留的中继风格 model id 照常保存，用户分
+// 不清「改错了」还是「还没生效」。旧值必须显式标记 + 行级提示（改选或点连
+// 通性测试当场验证 + 重启生效）；适配器列表为空或 provider 未注册时前端无
+// 从校验 model，一律不标记防误报。
+test("stale route values are marked and explained at the row level (issue #191)", () => {
+  // 1. 旧值判定：仅在适配器列表非空时比对；model 只在 provider 已注册时校验
+  assert.ok(
+    /const hasProviders = entries\.length > 0;/.test(clientSource),
+    "stale checks must be gated on a non-empty provider registry (no false alarms)"
+  );
+  assert.ok(
+    /const pStale = hasProviders && !!curP && !entry;/.test(clientSource),
+    "a saved provider missing from /llm-providers must be flagged"
+  );
+  assert.ok(
+    /const mStale = hasProviders && !!entry && !!curM && !mVals\.includes\(curM\);/.test(clientSource),
+    "a saved model outside the selected provider's list must be flagged only when that provider is registered"
+  );
+  // 2. 标记落在选项文本上：下拉收起时也能看出旧值不在列表
+  assert.ok(
+    /pStale && p === curP \? p \+ t\("memory\.features\.routeStaleMark"\) : p/.test(clientSource),
+    "the preserved provider option must carry the stale mark"
+  );
+  // 3. 行级提示：⚠ 警示 + 改选/测试引导 + 重启生效，一条提示说完
+  assert.ok(
+    /\(pStale \|\| mStale\) && h\("div", \{ className: "mneme-featsubhint" \},\s*\n\s*"⚠ " \+ t\("memory\.features\.routeStaleHint"\)/.test(clientSource),
+    "the stale warning hint must render at the route row with the warning prefix"
+  );
+  // 3b. 旧值保留必须无条件：列表为空（端点刚起 / 零适配器）时也不得把已存
+  // provider 静默显示成「跟随默认路由」——只有标记带门，保留不带门。
+  assert.ok(
+    /curP && !entries\.some\(\(p\) => p\.provider === curP\) \? \[curP\] : \[\]/.test(clientSource),
+    "the preserved provider option must stay unconditional (empty list must not hide the saved value)"
+  );
+  // 3c. 英文提示不得把「不在列表」限定在 model 维度——provider 本身不在
+  // 列表时同样渲染此行（CodeRabbit #213 review）。
+  assert.ok(
+    !clientSource.includes("provider's model list"),
+    "the en stale hint must cover provider-absence too, not only the model case"
+  );
+  // 4. 连通性测试按钮的说明与结果互斥（同一行槽位二选一，不堆叠）
+  assert.ok(
+    /\(testState && !testState\.running\s*\n\s*\? h\("div", \{ className: "mneme-featsubhint" \},/.test(clientSource)
+      && clientSource.includes('t("memory.features.modelTestHint")'),
+    "the test row must show either the result or the standing explanation, never both"
   );
 });
 

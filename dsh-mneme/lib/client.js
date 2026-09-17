@@ -383,6 +383,8 @@ window.__ModuleLoader__.load({
         "memory.features.modelTestOk": "连通正常",
         "memory.features.modelTestFail": "测试失败",
         "memory.features.modelTestHint": "真实发起一次最小巩固调用，验证 Provider/模型连通与 effort 支持",
+        "memory.features.routeStaleMark": "（不在可用列表）",
+        "memory.features.routeStaleHint": "不在当前可用列表，多为切换 Provider 后的旧值：请改选，或点「测试连通性」当场验证；改动保存后重启 DSH 生效。",
         "memory.explorer.viewCards": "卡片",
         "memory.explorer.viewTimeline": "时间线",
         "memory.explorer.viewAria": "视图切换",
@@ -734,6 +736,8 @@ window.__ModuleLoader__.load({
         "memory.features.modelTestOk": "Connected",
         "memory.features.modelTestFail": "Test failed",
         "memory.features.modelTestHint": "Fires one minimal consolidation call to verify provider/model connectivity and effort support",
+        "memory.features.routeStaleMark": " (not in list)",
+        "memory.features.routeStaleHint": "Not in the currently available list, often a leftover from a provider switch: reselect, or run a connectivity test to verify now; changes take effect after restarting DSH.",
         "memory.explorer.viewCards": "Cards",
         "memory.explorer.viewTimeline": "Timeline",
         "memory.explorer.viewAria": "Switch view",
@@ -1903,7 +1907,7 @@ window.__ModuleLoader__.load({
       // 巩固/睡眠路由行：provider/model 级联下拉（数据来自宿主侧已注册的
       // 适配器，用户不会选到不存在的模型）+ 连通性测试。空值 = 跟随默认
       // 路由；改动即提交（与 embedProvider 下拉一致）。当前值不在枚举里时
-      // 保留为额外选项，避免静默改值。
+      // 保留为额外选项避免静默改值，并显式标记 + 行级提示（issue #191）。
       const routeSelects = (providerKey, modelKey, testState, setTestState) => {
         const curP = strs[providerKey] ?? "";
         const curM = strs[modelKey] ?? "";
@@ -1911,6 +1915,13 @@ window.__ModuleLoader__.load({
         const entry = entries.find((p) => p && p.provider === curP);
         const models = (entry && Array.isArray(entry.models)) ? entry.models : [];
         const mVals = models.map(modelValue);
+        // issue #191：旧值保留是刻意不丢配置，但必须看得见。适配器列表为空
+        // （端点刚起 / 宿主零适配器）时无从比对，不标记防误报；provider 未
+        // 选或本身不在列表时，模型归属由后端按默认路由解析，前端不校验
+        // model——只在 provider 已注册时查配套。
+        const hasProviders = entries.length > 0;
+        const pStale = hasProviders && !!curP && !entry;
+        const mStale = hasProviders && !!entry && !!curM && !mVals.includes(curM);
         const pList = entries.map((p) => p.provider).concat(
           curP && !entries.some((p) => p.provider === curP) ? [curP] : []);
         const putKey = (key) => (e) => {
@@ -1926,7 +1937,8 @@ window.__ModuleLoader__.load({
               "aria-label": t(`memory.features.${providerKey}`), onChange: putKey(providerKey)
             },
               h("option", { value: "" }, t("memory.features.routeFollowDefault")),
-              pList.map((p) => h("option", { key: p, value: p }, p)))),
+              pList.map((p) => h("option", { key: p, value: p },
+                pStale && p === curP ? p + t("memory.features.routeStaleMark") : p)))),
           h("div", { className: "mneme-featnum" },
             h("span", { className: "mneme-featnumlabel" }, t(`memory.features.${modelKey}`)),
             h("select", {
@@ -1935,17 +1947,23 @@ window.__ModuleLoader__.load({
             },
               h("option", { value: "" }, t("memory.features.routeFollowDefault")),
               models.map((m, i) => h("option", { key: modelValue(m) + "|" + i, value: modelValue(m) }, modelLabel(m))),
-              curM && !mVals.includes(curM) ? h("option", { key: "current", value: curM }, curM) : null)),
+              curM && !mVals.includes(curM) ? h("option", { key: "current", value: curM },
+                mStale ? curM + t("memory.features.routeStaleMark") : curM) : null)),
+          (pStale || mStale) && h("div", { className: "mneme-featsubhint" },
+            "⚠ " + t("memory.features.routeStaleHint")),
           h("div", { className: "mneme-featnum" },
             h("button", {
               type: "button", className: "mneme-btn",
               disabled: busy || (testState && testState.running),
               onClick: () => runModelTest(curP, curM, setTestState)
             }, t((testState && testState.running) ? "memory.features.modelTesting" : "memory.features.modelTest")),
-            testState && !testState.running && h("div", { className: "mneme-featsubhint" },
-              (testState.ok ? "✓ " + t("memory.features.modelTestOk") : "✗ " + t("memory.features.modelTestFail"))
-              + (typeof testState.ms === "number" ? " · " + (testState.ms / 1000).toFixed(1) + "s" : "")
-              + (testState.detail ? " · " + testState.detail : "")))
+            // 结果与说明共用同一行槽位二选一：出结果后说明自动让位，不堆叠。
+            (testState && !testState.running
+              ? h("div", { className: "mneme-featsubhint" },
+                  (testState.ok ? "✓ " + t("memory.features.modelTestOk") : "✗ " + t("memory.features.modelTestFail"))
+                  + (typeof testState.ms === "number" ? " · " + (testState.ms / 1000).toFixed(1) + "s" : "")
+                  + (testState.detail ? " · " + testState.detail : ""))
+              : h("div", { className: "mneme-featsubhint" }, t("memory.features.modelTestHint"))))
         );
       };
 
