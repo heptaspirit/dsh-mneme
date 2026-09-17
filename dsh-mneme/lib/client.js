@@ -1875,14 +1875,20 @@ window.__ModuleLoader__.load({
       // 连通性测试：POST /test-model，空 provider/model = 按巩固路由解析
       // （agent 默认）。durationMs 优先后端值，缺失时客户端兜底计时；成功行
       // 附模型的实际回复（reply，后端截 100 字符）——「真的答了 ok」而非只报通。
-      const runModelTest = async (provider, model, setTestState) => {
+      // reasoningEffort 透传该路由配置的档位（issue #215）：sleep 无回退重试，
+      // 档位被拒时真实 run 直接失败，测试是事前唯一的暴露口；'none'/未配置
+      // 省略字段，与后端 src/api.js 的同口径。
+      const runModelTest = async (provider, model, setTestState, reasoningEffort) => {
         setTestState({ running: true });
         const started = Date.now();
         try {
           const res = await apiFetch("/api/dsh-mneme/test-model", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ provider, model })
+            body: JSON.stringify({
+              provider, model,
+              ...(reasoningEffort && reasoningEffort !== "none" ? { reasoningEffort } : {})
+            })
           });
           const j = await res.json().catch(() => ({}));
           const ms = typeof j.durationMs === "number" ? j.durationMs : Date.now() - started;
@@ -1908,9 +1914,12 @@ window.__ModuleLoader__.load({
       // 适配器，用户不会选到不存在的模型）+ 连通性测试。空值 = 跟随默认
       // 路由；改动即提交（与 embedProvider 下拉一致）。当前值不在枚举里时
       // 保留为额外选项避免静默改值，并显式标记 + 行级提示（issue #191）。
-      const routeSelects = (providerKey, modelKey, testState, setTestState) => {
+      const routeSelects = (providerKey, modelKey, testState, setTestState, effortKey) => {
         const curP = strs[providerKey] ?? "";
         const curM = strs[modelKey] ?? "";
+        // 该路由配置的档位（键名由调用点按路由行传入，issue #215）；
+        // ''/'none' 由 runModelTest 统一省略。
+        const effort = effortKey ? (eff[effortKey] || "") : "";
         const entries = Array.isArray(routes) ? routes : [];
         const entry = entries.find((p) => p && p.provider === curP);
         const models = (entry && Array.isArray(entry.models)) ? entry.models : [];
@@ -1955,7 +1964,7 @@ window.__ModuleLoader__.load({
             h("button", {
               type: "button", className: "mneme-btn",
               disabled: busy || (testState && testState.running),
-              onClick: () => runModelTest(curP, curM, setTestState)
+              onClick: () => runModelTest(curP, curM, setTestState, effort)
             }, t((testState && testState.running) ? "memory.features.modelTesting" : "memory.features.modelTest")),
             // 结果与说明共用同一行槽位二选一：出结果后说明自动让位，不堆叠。
             (testState && !testState.running
@@ -2001,7 +2010,7 @@ window.__ModuleLoader__.load({
       // 可用时用级联下拉 + 连通性测试；旧后端（端点 404）回退纯文本输入。
       const dreamSub = eff.autoDream && h("div", { className: "mneme-featsub" },
         Array.isArray(routes)
-          ? routeSelects("dreamProvider", "dreamModel", dreamTest, setDreamTest)
+          ? routeSelects("dreamProvider", "dreamModel", dreamTest, setDreamTest, "dreamReasoningEffort")
           : h(react.Fragment, null, strRow("dreamProvider"), strRow("dreamModel")),
         h("div", { className: "mneme-featsubhint" }, t("memory.features.dreamModelHint"))
       );
@@ -2009,7 +2018,7 @@ window.__ModuleLoader__.load({
       // 睡眠模型：sleepModeEnabled 开着才展开（sleepProvider/sleepModel 随本版
       // 进白名单；下拉与测试复用同一 /llm-providers 数据源）。
       const sleepSub = eff.sleepModeEnabled && Array.isArray(routes) && h("div", { className: "mneme-featsub" },
-        routeSelects("sleepProvider", "sleepModel", sleepTest, setSleepTest),
+        routeSelects("sleepProvider", "sleepModel", sleepTest, setSleepTest, "sleepReasoningEffort"),
         h("div", { className: "mneme-featsubhint" }, t("memory.features.sleepModelHint"))
       );
 
@@ -2018,7 +2027,7 @@ window.__ModuleLoader__.load({
       // 枚举即时提交；旧后端（/llm-providers 404）回退纯文本输入。
       const entitySub = eff.entityExtractionEnabled && h("div", { className: "mneme-featsub" },
         Array.isArray(routes)
-          ? routeSelects("entityExtractionProvider", "entityExtractionModel", entityTest, setEntityTest)
+          ? routeSelects("entityExtractionProvider", "entityExtractionModel", entityTest, setEntityTest, "entityExtractionReasoning")
           : h(react.Fragment, null, strRow("entityExtractionProvider"), strRow("entityExtractionModel")),
         h("div", { className: "mneme-featnum" },
           h("span", { className: "mneme-featnumlabel" }, t("memory.features.entityExtractionReasoning")),

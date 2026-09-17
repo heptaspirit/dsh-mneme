@@ -513,8 +513,8 @@ test("consolidation/sleep model routing: provider dropdowns from /llm-providers,
     "the probe must only accept a {providers: []} shape"
   );
   assert.ok(
-    /Array\.isArray\(routes\)\s*\?\s*routeSelects\("dreamProvider", "dreamModel", dreamTest, setDreamTest\)/.test(clientSource),
-    "dream routing must upgrade to dropdowns only when the probe succeeded"
+    /Array\.isArray\(routes\)\s*\?\s*routeSelects\("dreamProvider", "dreamModel", dreamTest, setDreamTest, "dreamReasoningEffort"\)/.test(clientSource),
+    "dream routing must upgrade to dropdowns only when the probe succeeded (and pass its own effort key)"
   );
   assert.ok(
     /:\s*h\(react\.Fragment, null, strRow\("dreamProvider"\), strRow\("dreamModel"\)\)/.test(clientSource),
@@ -522,7 +522,7 @@ test("consolidation/sleep model routing: provider dropdowns from /llm-providers,
   );
   // 2. 睡眠侧行：跟随 sleepModeEnabled 门控，与巩固共用数据源
   assert.ok(
-    /const sleepSub = eff\.sleepModeEnabled && Array\.isArray\(routes\) && h\("div", \{ className: "mneme-featsub" \},\s*\n\s*routeSelects\("sleepProvider", "sleepModel", sleepTest, setSleepTest\)/.test(clientSource),
+    /const sleepSub = eff\.sleepModeEnabled && Array\.isArray\(routes\) && h\("div", \{ className: "mneme-featsub" \},\s*\n\s*routeSelects\("sleepProvider", "sleepModel", sleepTest, setSleepTest, "sleepReasoningEffort"\)/.test(clientSource),
     "the sleep route row must gate on sleepModeEnabled and share the providers source"
   );
   // 2b. 睡眠路由的值必须进初始化草稿：FEATURE_STRINGS 漏键会导致重挂载后
@@ -539,8 +539,8 @@ test("consolidation/sleep model routing: provider dropdowns from /llm-providers,
     "the connectivity test state must be per-route, not shared between dream and sleep"
   );
   assert.ok(
-    /runModelTest\(curP, curM, setTestState\)/.test(clientSource),
-    "each route's test button must target its own test state"
+    /runModelTest\(curP, curM, setTestState, effort\)/.test(clientSource),
+    "each route's test button must target its own test state and pass the route's configured effort"
   );
   // 3. 连通性测试：真实最小调用 + 结果展示（成功/失败 + 耗时 + 报错原因）
   assert.ok(
@@ -548,8 +548,8 @@ test("consolidation/sleep model routing: provider dropdowns from /llm-providers,
     "the connectivity test must POST /test-model"
   );
   assert.ok(
-    /body: JSON\.stringify\(\{ provider, model \}\)/.test(clientSource),
-    "the test payload must carry the selected provider/model (empty = follow default route)"
+    /body: JSON\.stringify\(\{\s*provider, model,\s*\.\.\.\(reasoningEffort && reasoningEffort !== "none" \? \{ reasoningEffort \} : \{\}\)\s*\}\)/.test(clientSource),
+    "the test payload must carry provider/model plus the configured reasoningEffort, omitted for 'none'/unset (issue #215, same convention as the backend)"
   );
   assert.ok(
     /typeof j\.durationMs === "number" \? j\.durationMs : Date\.now\(\) - started/.test(clientSource),
@@ -627,6 +627,20 @@ test("stale route values are marked and explained at the row level (issue #191)"
   assert.ok(
     !clientSource.includes("provider's model list"),
     "the en stale hint must cover provider-absence too, not only the model case"
+  );
+  // 4. issue #215：三条路由各自透传自己的档位键——routeSelects 按路由行
+  // 传入键名、从生效配置取值；sleep 无回退重试，档位被拒时测试是事前唯一
+  // 的暴露口。
+  assert.ok(
+    /const routeSelects = \(providerKey, modelKey, testState, setTestState, effortKey\) => \{/.test(clientSource)
+      && /const effort = effortKey \? \(eff\[effortKey\] \|\| ""\) : ""/.test(clientSource),
+    "routeSelects must take the route's effort key and read the configured value from effective settings"
+  );
+  assert.ok(
+    /routeSelects\("dreamProvider", "dreamModel", dreamTest, setDreamTest, "dreamReasoningEffort"\)/.test(clientSource)
+      && /routeSelects\("sleepProvider", "sleepModel", sleepTest, setSleepTest, "sleepReasoningEffort"\)/.test(clientSource)
+      && /routeSelects\("entityExtractionProvider", "entityExtractionModel", entityTest, setEntityTest, "entityExtractionReasoning"\)/.test(clientSource),
+    "each route row must pass its own reasoning effort key (dream/sleep/entityExtraction)"
   );
   // 4. 连通性测试按钮的说明与结果互斥（同一行槽位二选一，不堆叠）
   assert.ok(
