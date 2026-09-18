@@ -1444,6 +1444,30 @@ export function createService({ store, mirror, config, onWrite, logger }) {
     }
     const selected = candidates.slice(0, maxItems);
     touchRecalled(selected);
+    // #217 口径（2026-09-19 拍板）：注入是曝光型访问事件，与检索命中同表分账
+    // （mode='inject'，candidates 存实际注入集）。跟随 recallRecordDefault——
+    // 与检索侧同门，不设新配置键；heat 关闭时照写，留痕与消费解耦（两 issue
+    // 独立验收）。空选不记（没有访问发生）；记账失败不影响注入本身。
+    if ((config?.recallRecordDefault ?? true) && recallRecorder && selected.length > 0) {
+      try {
+        recallRecorder({
+          // recall_runs.query 是 NOT NULL（store.js:61）：注入是主动曝光、
+          // 没有查询词，用空串而非 null——SQLite 改列约束需重建表，不值得。
+          query: "",
+          mode: "inject",
+          topK: maxItems,
+          threshold: null,
+          candidates: selected.map((m) => ({
+            id: m.id,
+            title: m.title,
+            content: m.content,
+            score: m.score ?? null,
+            source: m.source ?? "keyword"
+          })),
+          createdAt: new Date().toISOString()
+        });
+      } catch { /* recall receipt is best effort */ }
+    }
     return selected;
   }
 

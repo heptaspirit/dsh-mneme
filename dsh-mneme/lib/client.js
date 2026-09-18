@@ -470,6 +470,7 @@ window.__ModuleLoader__.load({
         "memory.status.heatHint": "热门（≥66%）{hot} · 温热（33–66%）{warm} · 冷却（<33%）{cold}，样本为最近 {sample} 条",
         "memory.status.recallStats": "记忆复用",
         "memory.status.recallHint": "复用率 {rate} · 僵尸 {zombie}/{active}（豁免 {exempt}）· 30 天回执 {runs} 次 · Top：{top}",
+        "memory.status.recallInject": "注入 {runs} 轮 {count} 条，槽位填充 {fill}%",
         "memory.status.viewAll": "查看全部",
         "memory.status.depositedCount": "沉淀的记忆（{n}）",
         "memory.status.archivedCount": "已归档的记忆（{n}）",
@@ -829,6 +830,7 @@ window.__ModuleLoader__.load({
         "memory.status.heatHint": "hot (≥66%) {hot} · warm (33–66%) {warm} · cooled (<33%) {cold}, sampled from the latest {sample}",
         "memory.status.recallStats": "Recall reuse",
         "memory.status.recallHint": "reuse {rate} · zombie {zombie}/{active} (exempt {exempt}) · {runs} runs in 30d · top: {top}",
+        "memory.status.recallInject": "injected {runs} turns · {count} items ({fill}% slots)",
         "memory.status.viewAll": "View all",
         "memory.status.depositedCount": "Deposited memories ({n})",
         "memory.status.archivedCount": "Archived memories ({n})",
@@ -3284,7 +3286,7 @@ window.__ModuleLoader__.load({
     // 口径不可信）或库为空时整卡不渲染，前端不感知；truncated（扫描超上限）
     // 只影响 hint 里的回执计数，不挡渲染。
     function RecallStatsCard({ t }) {
-      const [state, setState] = useState({ loading: true, off: false, rate: null, zombie: 0, active: 0, exempt: 0, runs: 0, top: "" });
+      const [state, setState] = useState({ loading: true, off: false, rate: null, zombie: 0, active: 0, exempt: 0, runs: 0, top: "", inject: "" });
       useEffect(() => {
         let cancelled = false;
         apiFetch("/api/dsh-mneme/recall-stats?window=30")
@@ -3301,10 +3303,18 @@ window.__ModuleLoader__.load({
             const top = (d.topRecalled || []).slice(0, 3)
               .map((m) => (m.title || "").slice(0, 12))
               .join(" · ");
+            // 注入口径（#217 增量）：窗口内无注入行（旧数据/关闭落账）时整段省略
+            const inj = d.injection || {};
+            const inject = (inj.runs ?? 0) > 0
+              ? t("memory.status.recallInject")
+                .replace("{runs}", String(inj.runs))
+                .replace("{count}", String(inj.injectedCount ?? 0))
+                .replace("{fill}", inj.slotFillRate == null ? "—" : String(Math.round(inj.slotFillRate * 100)))
+              : "";
             setState({
               loading: false, off: false, rate,
               zombie: z.zombieCount ?? 0, active: z.activeCount ?? 0,
-              exempt: z.exemptCount ?? 0, runs: d.coverage?.runsScanned ?? 0, top
+              exempt: z.exemptCount ?? 0, runs: d.coverage?.runsScanned ?? 0, top, inject
             });
           })
           .catch(() => { if (!cancelled) setState({ loading: false, off: true }); });
@@ -3323,7 +3333,7 @@ window.__ModuleLoader__.load({
           .replace("{active}", String(state.active))
           .replace("{exempt}", String(state.exempt))
           .replace("{runs}", String(state.runs))
-          .replace("{top}", state.top || "—")
+          .replace("{top}", state.top || "—") + (state.inject ? " · " + state.inject : "")
       });
     }
 

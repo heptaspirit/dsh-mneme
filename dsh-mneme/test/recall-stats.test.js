@@ -71,7 +71,13 @@ test("僵尸率：零曝光活跃计入，归档/遗忘剔除，豁免期单独�
   assert.equal(withExempt.zombie.activeCount, 0);
   assert.equal(withExempt.zombie.rate, null);
 
-  // 豁免归零：归档/遗忘剔除，零曝光的 z 计僵尸
+  // 豁免归零：归档/遗忘剔除，零曝光的 z 计僵尸。回拨 created_at 避开
+  // nowIso 同毫秒单调顶推的 1ms 豁免边界——刚写入的记忆可能比 recallStats
+  // 的 Date.now() 晚 1ms，exemptDays:0 时落进豁免桶，断言随调度抖动翻转。
+  const old = new Date(Date.now() - 10 * 86400000).toISOString();
+  for (const m of store.all()) {
+    store.db.prepare("UPDATE memories SET created_at = ? WHERE id = ?").run(old, m.id);
+  }
   const stats = service.recallStats({ windowDays: 30, exemptDays: 0 });
   assert.equal(stats.zombie.activeCount, 2, "归档与遗忘不进分母");
   assert.equal(stats.zombie.zombieCount, 1);

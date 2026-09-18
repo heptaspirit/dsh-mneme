@@ -14,6 +14,9 @@
  *  - 僵尸率：活跃（未归档未遗忘）且窗口内零候选出现；分母剔除写入不足
  *    豁免期的记忆（按当前时刻计，exemptCount 单独报数）。
  *  - 注入命中率：注入侧无留痕，待 #217 mode='inject' 口径拍板后接入。
+ *  - 注入命中率：mode='inject' 行单独计数（2026-09-19 拍板），slotFillRate =
+ *    注入条数 / (轮数 × maxInjectSlots，默认 5)；注入候选同时进 hits——注入是
+ *    曝光型访问事件，计入 Top-N 与僵尸零曝光判定。
  *  - coverage：recallRecordDefault 开启前的窗口算不到，earliestRunAt 为
  *    null（窗口内无回执）或早于窗口起点时，前端标注可信度；扫描行数有
  *    上限，超出标 truncated（degraded 口径），不静默少算。
@@ -28,13 +31,27 @@ export function recallStats(store, options = {}) {
   // 调口径不留硬编码；越界值静默回默认（与 windowDays 同款宽容）。
   const rawExempt = Number(options.exemptDays ?? 7);
   const exemptDays = Number.isInteger(rawExempt) && rawExempt >= 0 && rawExempt <= 365 ? rawExempt : 7;
+  // 注入槽位数（#217 增量）：slotFillRate 分母用；默认 5 与 injectCandidates
+  // 的 maxItems 默认一致，option 化防调用方自定义槽位时算错填充率。
+  const rawSlots = Number(options.maxInjectSlots ?? 5);
+  const maxInjectSlots = Number.isInteger(rawSlots) && rawSlots >= 1 ? rawSlots : 5;
   const now = Date.now();
   const since = new Date(now - windowDays * 86400000).toISOString();
 
   const { rows: runs, total } = store.listRecallRunsSince(since);
   const hits = new Map(); // id -> { count, title, source }
+  // 注入命中率口径（#217 增量，2026-09-19 拍板）：mode='inject' 行单独计数，
+  // slotFillRate = 注入条数 / (轮数 × 槽位数)；注入候选同时进 hits——注入是
+  // 曝光型访问事件，计入 Top-N 与僵尸零曝光判定。
+  let injectRuns = 0;
+  let injectedCount = 0;
   for (const run of runs) {
-    for (const cand of run.candidates ?? []) {
+    const cands = run.candidates ?? [];
+    if (run.mode === "inject") {
+      injectRuns += 1;
+      injectedCount += cands.length;
+    }
+    for (const cand of cands) {
       if (!cand?.id) continue;
       const cur = hits.get(cand.id) ?? { count: 0, title: cand.title ?? null, source: cand.source ?? null };
       cur.count += 1;
@@ -89,6 +106,11 @@ export function recallStats(store, options = {}) {
       runsTotal: total,
       truncated: total > runs.length,
       earliestRunAt: runs.length ? runs[0].created_at : null
+    },
+    injection: {
+      runs: injectRuns,
+      injectedCount,
+      slotFillRate: injectRuns > 0 ? injectedCount / (injectRuns * maxInjectSlots) : null
     },
     topRecalled,
     zombie: {
