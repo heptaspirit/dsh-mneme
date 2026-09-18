@@ -464,6 +464,8 @@ window.__ModuleLoader__.load({
         "memory.status.archivedMemories": "已归档的记忆",
         "memory.status.heatDistribution": "热度分布",
         "memory.status.heatHint": "热门（≥66%）{hot} · 温热（33–66%）{warm} · 冷却（<33%）{cold}，样本为最近 {sample} 条",
+        "memory.status.recallStats": "记忆复用",
+        "memory.status.recallHint": "复用率 {rate} · 僵尸 {zombie}/{active}（豁免 {exempt}）· 30 天回执 {runs} 次 · Top：{top}",
         "memory.status.viewAll": "查看全部",
         "memory.status.depositedCount": "沉淀的记忆（{n}）",
         "memory.status.archivedCount": "已归档的记忆（{n}）",
@@ -817,6 +819,8 @@ window.__ModuleLoader__.load({
         "memory.status.archivedMemories": "Archived memories",
         "memory.status.heatDistribution": "Heat distribution",
         "memory.status.heatHint": "hot (≥66%) {hot} · warm (33–66%) {warm} · cooled (<33%) {cold}, sampled from the latest {sample}",
+        "memory.status.recallStats": "Recall reuse",
+        "memory.status.recallHint": "reuse {rate} · zombie {zombie}/{active} (exempt {exempt}) · {runs} runs in 30d · top: {top}",
         "memory.status.viewAll": "View all",
         "memory.status.depositedCount": "Deposited memories ({n})",
         "memory.status.archivedCount": "Archived memories ({n})",
@@ -3247,6 +3251,54 @@ window.__ModuleLoader__.load({
       });
     }
 
+    // 记忆复用卡（#217）：只读聚合 /recall-stats（Top-N 召回 + 僵尸率 +
+    // 覆盖度）。自门控——接口失败、窗口内无任何回执（earliestRunAt=null，
+    // 口径不可信）或库为空时整卡不渲染，前端不感知；truncated（扫描超上限）
+    // 只影响 hint 里的回执计数，不挡渲染。
+    function RecallStatsCard({ t }) {
+      const [state, setState] = useState({ loading: true, off: false, rate: null, zombie: 0, active: 0, exempt: 0, runs: 0, top: "" });
+      useEffect(() => {
+        let cancelled = false;
+        apiFetch("/api/dsh-mneme/recall-stats?window=30")
+          .then((res) => { if (!res.ok) throw new Error("http"); return res.json(); })
+          .then((d) => {
+            if (cancelled) return;
+            const z = d.zombie || {};
+            const hasData = (d.coverage?.runsScanned ?? 0) > 0 || (z.activeCount ?? 0) > 0;
+            if (!hasData) {
+              setState({ loading: false, off: true });
+              return;
+            }
+            const rate = z.rate == null ? null : Math.round((1 - z.rate) * 100) + "%";
+            const top = (d.topRecalled || []).slice(0, 3)
+              .map((m) => (m.title || "").slice(0, 12))
+              .join(" · ");
+            setState({
+              loading: false, off: false, rate,
+              zombie: z.zombieCount ?? 0, active: z.activeCount ?? 0,
+              exempt: z.exemptCount ?? 0, runs: d.coverage?.runsScanned ?? 0, top
+            });
+          })
+          .catch(() => { if (!cancelled) setState({ loading: false, off: true }); });
+        return () => { cancelled = true; };
+      }, []);
+      if (state.off) return null;
+      return h(StatusCard, {
+        t,
+        title: t("memory.status.recallStats"),
+        loading: state.loading,
+        error: false,
+        num: state.rate ?? "—",
+        cap: t("memory.status.recallHint")
+          .replace("{rate}", state.rate ?? "—")
+          .replace("{zombie}", String(state.zombie))
+          .replace("{active}", String(state.active))
+          .replace("{exempt}", String(state.exempt))
+          .replace("{runs}", String(state.runs))
+          .replace("{top}", state.top || "—")
+      });
+    }
+
     function StatusPanel({ t, onBrowse }) {
       return h("div", { className: "mneme-status" },
         h("div", { className: "mneme-statusgrid" },
@@ -3255,7 +3307,8 @@ window.__ModuleLoader__.load({
           h(VectorStatusCard, { t }),
           h(LlmStatusCard, { t }),
           h(DreamStatusCards, { t }),
-          h(HeatStatusCard, { t })
+          h(HeatStatusCard, { t }),
+          h(RecallStatsCard, { t })
         ),
         h(ConflictsQueue, { t }),
         h(WorkbenchSection, { t, onBrowse })

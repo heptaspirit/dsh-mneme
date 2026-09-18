@@ -26,6 +26,7 @@ dsh-mneme 是 DSH 宿主的记忆插件（蒸馏 / 注入 / 检索 / 巩固 / sc
 | 实体 | `src/entities/extractor.js`（存储侧在 store 三表） | 写入时 LLM 抽取实体/属性/关系 |
 | 检索辅助 | `src/search/{bm25,adaptive}.js`、`src/vector-index.js`、`src/embedding.js`、`src/local-embedder.js`、`src/reranker.js` | BM25 / 自适应阈值 / 向量索引 / 嵌入 / 重排 |
 | 热度 | `src/heat.js` | 纯函数遗忘曲线（opt-in） |
+| 复用统计 | `src/recall-stats.js` | recall_runs 只读聚合（#217，Top-N 召回 + 僵尸率） |
 | 冷启动 | `src/bootstrap.js` | 从仓库文件反向构建初始记忆（POST /bootstrap） |
 | 配置 | `src/config.js`（schema + lightMode）、`src/settings.js`（feature flags 白名单） | 一切行为开关的家 |
 | API 面 | `src/api.js`（宿主内 /api/dsh-mneme/*）、`src/api-standalone.js`（Bearer 数据面）、`bin/dsh-mneme-mcp.mjs`（MCP stdio） | 对外三张脸 |

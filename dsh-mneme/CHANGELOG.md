@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+## 🆕 新增
+
+- **记忆复用统计端点与面板卡（issue #217）**：`GET /api/dsh-mneme/recall-stats?window=30d`（1-365 天钳制）只读聚合——Top-N 召回（按窗口内 recall_runs 候选计数，join memories 补 type/source，已删记忆 type=null）、僵尸记忆率（活跃且窗口内零曝光，豁免期 7 天单独报数）、覆盖度标注（earliestRunAt / 扫描超上限 truncated）；纯读聚合独立成模块 `src/recall-stats.js`（service.js 过 2000 行参考线，barrel 出口调用方零改动）；面板状态页新增「记忆复用」卡（自门控，窗口内无回执整卡不渲染）。注入命中率与「入池未中」零召回语义（B）待注入留痕口径拍板后接入。
+
 ## [0.8.3] - 2026-09-17
 
 ## 🆕 新增

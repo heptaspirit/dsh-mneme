@@ -1566,6 +1566,23 @@ export function createStore(path) {
     return rows.map(toRecallRun);
   }
 
+  /**
+   * Window scan for the recall-stats aggregation (#217): every recall_runs row
+   * created at/after sinceIso, oldest first (rows[0].created_at = earliest
+   * coverage marker), plus the untruncated window total so the caller can flag
+   * a capped scan instead of silently undercounting. Read-only; `limit` exists
+   * so tests can exercise the cap path without a 50k-row fixture.
+   */
+  function listRecallRunsSince(sinceIso, { limit = 50000 } = {}) {
+    const total = db.prepare(
+      "SELECT count(*) AS c FROM recall_runs WHERE created_at >= ?"
+    ).get(sinceIso).c;
+    const rows = db.prepare(
+      "SELECT * FROM recall_runs WHERE created_at >= ? ORDER BY created_at ASC, id LIMIT ?"
+    ).all(sinceIso, limit).map(toRecallRun);
+    return { rows, total };
+  }
+
   // --- recall evaluation trail (方案 B: separate from the production audit) -
 
   /**
@@ -2379,6 +2396,7 @@ export function createStore(path) {
     saveRecallRun,
     getRecallRun,
     listRecallRuns,
+    listRecallRunsSince,
     saveRecallEval,
     getRecallEval,
     listRecallEvals,

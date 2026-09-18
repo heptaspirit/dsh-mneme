@@ -4,6 +4,7 @@ import { updatedAtBounds } from "./store.js";
 import { normalizeExplicitScope, scopeKeyOf } from "./scope.js";
 import { STR, langOf } from "./lang.js";
 import { computeHeat } from "./heat.js";
+import { recallStats } from "./recall-stats.js";
 import { evaluateMemoryQuality } from "./quality-filter.js";
 import { applyDecisions } from "./dream/decisions.js";
 import { createBM25Index } from "./search/bm25.js";
@@ -2011,6 +2012,10 @@ export function createService({ store, mirror, config, onWrite, logger }) {
     setReranker(rn) { reranker = rn; },
     setRecallRecorder(fn) { recallRecorder = fn; },
     searchMemories,
+    // recallStats（#217）实现在 src/recall-stats.js：service.js 过 2000 行参考线，
+    // 新内聚块独立成模块（AGENTS.md 尺寸约定）；这里只留 barrel 出口，调用方
+    // （api 层）零改动。纯读聚合，见模块注释的口径说明。
+    recallStats: (options) => recallStats(store, options),
     embedQuery,
     findSessionDuplicate,
     evaluateRetrieval,

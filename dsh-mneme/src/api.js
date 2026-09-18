@@ -243,6 +243,28 @@ export function createApi(ctx, service, settings, commands, embedder, semantic =
     }
   });
 
+  // 记忆复用统计（#217，只读聚合）：Top-N 召回 + 僵尸率 + 覆盖度标注。窗口
+  // 参数钳制 1-365 天（缺省 30），聚合口径见 service.recallStats；注入命中
+  // 率待注入留痕口径拍板后接入。失败走既有 500 JSON 惯例，前端整卡不渲染。
+  register({
+    kind: "exact",
+    path: "/api/dsh-mneme/recall-stats",
+    handler(req, res) {
+      if (req.method !== "GET") {
+        sendJson(res, 404, { error: "not-found" });
+        return;
+      }
+      try {
+        const url = new URL(req.url, "http://localhost");
+        const raw = Number(url.searchParams.get("window"));
+        const windowDays = Number.isInteger(raw) && raw >= 1 && raw <= 365 ? raw : 30;
+        sendJson(res, 200, service.recallStats({ windowDays }));
+      } catch {
+        sendJson(res, 500, { error: "internal" });
+      }
+    }
+  });
+
   register({
     kind: "exact",
     path: "/api/dsh-mneme/search",
