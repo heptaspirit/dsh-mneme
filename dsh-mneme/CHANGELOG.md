@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+## 🆕 新增
+
+- **heat 广义指数衰减 + 注入排序热度乘数（issue #218）**：衰减式由幂律 `H=1/(1+λΔt)^α` 换为广义指数 `H=exp(-λ·Δt^β)`（FadeMem v2 Eq4，维护者拍板选型；幂律在 Wixted & Ebbesen 1991 / Rubin & Wenzel 1996 / FSRS 有支持但不在 #164 论文集内，留待真实负载回放两族 A/B）；`heatGlobalAlpha` → `heatGlobalBeta`（0.5–2，默认 1.0，默认关期间零迁移成本），λ=0 免疫位语义不变；`heatEnabled` 补进面板「记忆增强」组（feature flags 白名单第三处落位，面板可启停=回滚开关）；开启后注入排序规则路在优先级层内乘 heat——同级内乘数，priority 分层与 `order=chrono` 分页序不动，关闭时排序逐字节一致；touch 回温 / sleep 热联合判定 / 前端热度投影沿用存量路径。
+
 ## [0.8.3] - 2026-09-17
 
 ## 🆕 新增
