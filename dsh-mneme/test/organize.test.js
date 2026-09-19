@@ -16,13 +16,15 @@ const preference = (title, content = "内容", extra = {}) =>
 function makeOrganizer(embedQuery = async () => null, config = {}) {
   const store = createStore(":memory:");
   const service = createService({ store, mirror: null, config });
+  const finalizeCalls = [];
   const { organize } = createOrganizer({
     store,
     embedQuery,
     saveWithDedupe: service.saveWithDedupe,
-    transaction: service.transaction
+    transaction: service.transaction,
+    finalize: (rows) => finalizeCalls.push(rows)
   });
-  return { store, service, organize };
+  return { store, service, organize, finalizeCalls };
 }
 
 test("#231: dryRun writes no memory and leaves one organize receipt", async () => {
@@ -142,4 +144,148 @@ test("#231: single entry point with a mode parameter, exported through the servi
   assert.equal(typeof service.organize, "function", "service 层 barrel 出口（调用方零改动）");
   const report = await service.organize({ mode: "dryRun", candidates: [preference("走 service 的")] });
   assert.equal(report.counts.total, 1);
+});
+
+// --- 以下为 CodeRabbit #267 复核后补的边界：报告的索引/scope 必须与落库严格一致 ---
+
+test("#231: payload-level scope travels with the snapshot into the write", async () => {
+  const { store, organize } = makeOrganizer();
+  const report = await organize({
+    mode: "dryRun",
+    agent_scope: "agent-a",
+    candidates: [preference("带 scope 的偏好")]
+  });
+  const run = store.getDreamRun(report.run_id);
+  assert.equal(run.input[0].agent_scope, "agent-a", "审计存的是带 scope 的规范化快照");
+  assert.equal(run.input[0].index, 0, "快照保留原始索引，apply 才能按索引重放");
+  assert.equal(run.input[0].type, "preference");
+  await organize({ mode: "apply", run_id: report.run_id, decisions: [{ action: "save", index: 0 }] });
+  assert.equal(store.list({ limit: null })[0].agent_scope, "agent-a", "比对用的 scope 就是落地用的 scope");
+});
+
+test("#231: apply cannot land an index the dryRun never accepted", async () => {
+  const { store, organize } = makeOrganizer();
+  const report = await organize({
+    mode: "dryRun",
+    candidates: [preference("合法的"), { type: "document", title: "长文", content: "摘要" }]
+  });
+  assert.equal(report.counts.skipped, 1);
+  const outcome = await organize({
+    mode: "apply",
+    run_id: report.run_id,
+    decisions: [{ action: "save", index: 1 }] // dryRun 当时就拒了这一条
+  });
+  assert.equal(outcome.saved, 0);
+  assert.equal(outcome.status, "degraded");
+  assert.match(outcome.skipped[0].error, /not accepted by this dryRun/);
+  assert.equal(store.list({ limit: null }).length, 0, "被跳过的候选没有资格落库");
+});
+
+test("#231: apply refuses an apply receipt as its dryRun reference", async () => {
+  const { organize } = makeOrganizer();
+  const report = await organize({ mode: "dryRun", candidates: [preference("第一条")] });
+  const first = await organize({ mode: "apply", run_id: report.run_id, decisions: [{ action: "save", index: 0 }] });
+  // 两者共用 run_type='organize'，只有 outcome.dry_run_id 能把回执与报告分开。
+  await assert.rejects(
+    () => organize({ mode: "apply", run_id: first.run_id, decisions: [{ action: "save", index: 0 }] }),
+    /apply receipt/
+  );
+});
+
+test("#231: a throwing embedder fails the dryRun, audits it and rethrows", async () => {
+  const { store, service, organize } = makeOrganizer(async () => {
+    throw new Error("embedder offline");
+  });
+  const seeded = service.saveWithDedupe({ type: "preference", title: "已有向量", content: "内容" }).memory;
+  store.setEmbedding(seeded.id, [1, 0, 0]);
+  const seen = [];
+  const observed = createOrganizer({
+    store: { ...store, saveDreamRun: (row) => { seen.push(row); return store.saveDreamRun(row); } },
+    embedQuery: async () => {
+      throw new Error("embedder offline");
+    },
+    saveWithDedupe: service.saveWithDedupe,
+    transaction: service.transaction
+  });
+  await assert.rejects(() => observed.organize({ mode: "dryRun", candidates: [preference("新的一条")] }), /embedder offline/);
+  assert.equal(seen.at(-1).status, "failed", "基础设施错误留 failed 回执，不降级成「全是新条目」");
+  assert.match(seen.at(-1).error, /embedder offline/);
+  assert.equal(store.list({ limit: null }).length, 1, "失败路径零写入");
+});
+
+test("#231: an infrastructure write error rolls back and reports applied 0", async () => {
+  const { store, service, organize } = makeOrganizer();
+  const report = await organize({ mode: "dryRun", candidates: [preference("会写失败的")] });
+  const seen = [];
+  const failing = createOrganizer({
+    store: { ...store, saveDreamRun: (row) => { seen.push(row); return store.saveDreamRun(row); } },
+    embedQuery: async () => null,
+    saveWithDedupe: () => {
+      throw new Error("database is locked");
+    },
+    transaction: service.transaction
+  });
+  await assert.rejects(
+    () => failing.organize({ mode: "apply", run_id: report.run_id, decisions: [{ action: "save", index: 0 }] }),
+    /database is locked/
+  );
+  assert.equal(store.list({ limit: null }).length, 0, "整批回滚，零写入");
+  const failed = seen.at(-1);
+  assert.equal(failed.status, "failed");
+  assert.equal(failed.applied, 0, "回滚后不得虚报 applied");
+  assert.deepEqual(failed.outcome.byId, {});
+});
+
+test("#231: a failing success audit rolls the writes back with it", async () => {
+  const { store, service, organize } = makeOrganizer();
+  const report = await organize({ mode: "dryRun", candidates: [preference("回执写不进去")] });
+  let auditFailures = 0;
+  const audited = {
+    ...store,
+    saveDreamRun: (row) => {
+      if (row.run_type === "organize" && row.status === "ok" && row.id !== report.run_id) {
+        auditFailures++;
+        throw new Error("audit table is full");
+      }
+      return store.saveDreamRun(row);
+    }
+  };
+  const { organize: proxied } = createOrganizer({
+    store: audited,
+    embedQuery: async () => null,
+    saveWithDedupe: service.saveWithDedupe,
+    transaction: service.transaction
+  });
+  await assert.rejects(
+    () => proxied({ mode: "apply", run_id: report.run_id, decisions: [{ action: "save", index: 0 }] }),
+    /audit table is full/
+  );
+  assert.equal(auditFailures, 1);
+  assert.equal(store.list({ limit: null }).length, 0, "成功回执与数据同事务：回执写不进去 → 数据也回滚");
+});
+
+test("#231: finalize runs after commit with the saved rows, and not for empty batches", async () => {
+  const { store, organize, finalizeCalls } = makeOrganizer();
+  const report = await organize({ mode: "dryRun", candidates: [preference("要重嵌入的")] });
+  await organize({ mode: "apply", run_id: report.run_id, decisions: [{ action: "save", index: 0 }] });
+  assert.equal(finalizeCalls.length, 1, "提交后补一次重嵌入（transaction 里被 txDepth 挡掉）");
+  assert.equal(finalizeCalls[0][0].id, store.list({ limit: null })[0].id);
+  const discardsOnly = await organize({ mode: "dryRun", candidates: [preference("只丢弃")] });
+  await organize({ mode: "apply", run_id: discardsOnly.run_id, decisions: [{ action: "discard", index: 0 }] });
+  assert.equal(finalizeCalls.length, 1, "noop 批次不触发 finalize");
+});
+
+test("#231: archive honours the hidden-id set from the trusted caller, not the payload", async () => {
+  const { store, service, organize } = makeOrganizer();
+  const outOfScope = service.saveWithDedupe({ type: "project", title: "看不见的项目", content: "内容" }).memory;
+  const report = await organize({ mode: "dryRun", candidates: [preference("占位")] });
+  // opts 是第二参数（document 的 hiddenEvidenceIds 同款契约）：payload 里的同名字段
+  // 一律不认——那是调用方可自选的内容，不是授权。
+  const outcome = await service.organize(
+    { mode: "apply", run_id: report.run_id, decisions: [{ action: "archive", id: outOfScope.id }] },
+    { hiddenIds: [outOfScope.id] }
+  );
+  assert.equal(outcome.archived, 0);
+  assert.match(outcome.skipped[0].error, /out of scope/);
+  assert.equal(store.getById(outOfScope.id).archived, false, "看不见的行按不存在处理，不归档");
 });

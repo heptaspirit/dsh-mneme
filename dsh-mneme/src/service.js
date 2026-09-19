@@ -2074,8 +2074,17 @@ export function createService({ store, mirror, config, onWrite, logger }) {
 
   // agent 主动整理接口（#231）：dryRun 比对报告 → agent 判断 → apply 落库，筛除项
   // 进归档不删，全程复用 dream_runs 的 receipt 语义（不新建审计面）。走
-  // saveWithDedupe 落库 = 复用常规写路径的镜像/通知/重嵌入语，不另起一套。
-  const { organize } = createOrganizer({ store, embedQuery, saveWithDedupe, transaction });
+  // saveWithDedupe 落库 = 复用常规写路径的镜像/通知语；重嵌入由 finalize 在事务
+  // 提交后补（事务里的 scheduleEmbed 被 txDepth 挡掉）——document 同款先例。
+  const { organize } = createOrganizer({
+    store,
+    embedQuery,
+    saveWithDedupe,
+    transaction,
+    finalize: (rows) => {
+      for (const row of rows) scheduleEmbed(row);
+    }
+  });
 
   return {
     saveWithDedupe,
