@@ -73,8 +73,14 @@ test("#231: apply saves kept candidates, records discards, archives instead of d
   const stale = service.saveWithDedupe({ type: "project", title: "被取代的状态", content: "过时" }).memory;
   const report = await organize({
     mode: "dryRun",
-    candidates: [preference("新偏好"), { type: "decision", title: "被丢掉的决定", content: "不落库" }]
+    candidates: [
+      preference("新偏好"),
+      { type: "decision", title: "被丢掉的决定", content: "不落库" },
+      // 归档要有依据：只有报告命中过的行才有资格被归档，所以这条必须进 dryRun。
+      { type: "project", title: "被取代的状态", content: "新的状态描述" }
+    ]
   });
+  assert.equal(report.items[2].match.id, stale.id, "第二条项目候选命中的就是待归档那行");
   const outcome = await organize({
     mode: "apply",
     run_id: report.run_id,
@@ -98,6 +104,81 @@ test("#231: apply saves kept candidates, records discards, archives instead of d
   assert.equal(applyRun.outcome.dry_run_id, report.run_id);
   assert.equal(applyRun.applied, 2);
   assert.equal(parseReceipt(applyRun.receipt).status, "ok");
+});
+
+test("#231: dryRun compares in the candidate's own scope, not the payload's (#267 评审 1)", async () => {
+  const { service, organize } = makeOrganizer();
+  const seeded = service.saveWithDedupe({ ...preference("同标题的约束"), agent_scope: "agent-b" }).memory;
+  // 载荷级不给 scope，只在候选上给：报告必须按候选自己的 scope 看库，否则同一个
+  // scope 里明明已有同标题行也会报 "new"——报告 scope 与写入 scope 就此错位。
+  const report = await organize({
+    mode: "dryRun",
+    candidates: [{ ...preference("同标题的约束"), agent_scope: "agent-b" }]
+  });
+  assert.equal(report.items[0].verdict, "exact");
+  assert.equal(report.items[0].match.id, seeded.id);
+  // 反向：默认 scope 的候选看不到 agent-b 的行（跨 scope 永不互判，防泄漏）。
+  const other = await organize({ mode: "dryRun", candidates: [preference("同标题的约束")] });
+  assert.equal(other.items[0].verdict, "new");
+});
+
+test("#231: the same report cannot be applied twice (#267 评审 2)", async () => {
+  const { store, organize } = makeOrganizer();
+  const report = await organize({ mode: "dryRun", candidates: [preference("只应落一次")] });
+  await organize({ mode: "apply", run_id: report.run_id, decisions: [{ action: "save", index: 0 }] });
+  await assert.rejects(
+    () => organize({ mode: "apply", run_id: report.run_id, decisions: [{ action: "save", index: 0 }] }),
+    /already applied/
+  );
+  assert.equal(store.list({ limit: null }).filter((m) => m.title === "只应落一次").length, 1);
+  const receipts = store.listDreamRuns({}).filter((r) => r.outcome?.dry_run_id === report.run_id);
+  assert.equal(receipts.length, 1, "同一份报告只留一份落地回执");
+  assert.ok(store.getDreamRun(report.run_id).outcome.applied_at, "报告行上留了已落地凭证");
+});
+
+test("#231: archive only accepts ids the report flagged as matches (#267 评审 3)", async () => {
+  const { store, service, organize } = makeOrganizer();
+  const bystander = service.saveWithDedupe({ type: "project", title: "报告没提过的项目行", content: "无关" }).memory;
+  const report = await organize({ mode: "dryRun", candidates: [preference("只有偏好类")] });
+  const outcome = await organize({
+    mode: "apply",
+    run_id: report.run_id,
+    decisions: [{ action: "archive", id: bystander.id }]
+  });
+  assert.equal(outcome.archived, 0);
+  assert.match(outcome.skipped[0].error, /not flagged as a match/);
+  assert.equal(store.getById(bystander.id).archived, false, "报告没提过的行不许被动");
+  assert.equal(outcome.status, "degraded");
+});
+
+test("#231: merged candidates count as merged, not as new saves (#267 评审 2)", async () => {
+  const { store, service, organize } = makeOrganizer();
+  service.saveWithDedupe(preference("已被记下的偏好", "旧内容"));
+  const report = await organize({ mode: "dryRun", candidates: [preference("已被记下的偏好", "新内容")] });
+  assert.equal(report.items[0].verdict, "exact");
+  const outcome = await organize({ mode: "apply", run_id: report.run_id, decisions: [{ action: "save", index: 0 }] });
+  assert.equal(outcome.saved, 0, "同键命中走合并，不是新建");
+  assert.equal(outcome.merged, 1);
+  assert.equal(outcome.status, "ok", "合并也是落地生效，不能记成 noop");
+  assert.equal(store.list({ limit: null }).length, 1);
+  assert.equal(store.getDreamRun(outcome.run_id).applied, 1);
+});
+
+test("#231: a failing audit write does not replace the original error (#267 评审 4)", async () => {
+  const { store, organize } = makeOrganizer();
+  const report = await organize({ mode: "dryRun", candidates: [preference("会失败的落地")] });
+  // 审计整体不可用：事务内的「已落地」标记先抛 → 回滚 → 失败回执也写不进去。
+  store.saveDreamRun = () => {
+    throw new Error("audit unavailable");
+  };
+  await assert.rejects(
+    () => organize({ mode: "apply", run_id: report.run_id, decisions: [{ action: "save", index: 0 }] }),
+    (err) => {
+      assert.match(err.message, /audit unavailable/, "原始错误原样抛出");
+      assert.match(err.audit_error, /audit unavailable/, "审计的失败挂上去，不被静默吞掉");
+      return true;
+    }
+  );
 });
 
 test("#231: apply tolerates bad decisions — legal subset lands, run is degraded", async () => {

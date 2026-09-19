@@ -11,11 +11,14 @@
 // 四条硬规则，都是「宁可什么都不做」的形态：
 // 1. dryRun 不写记忆表：它只读 + 写一行审计（dream_runs）。比对是报告，不是动作。
 // 2. apply 必须引用一次真实 dryRun——run_id 且 run_type='organize'，且不是 apply
-//    自己的回执（靠 outcome.dry_run_id 区分）、也不是 failed 的报告。没有比对过的
+//    自己的回执（靠 outcome.dry_run_id 区分）、也不是 failed 的报告，且**还没落地过**
+//    （报告行上的 outcome.applied_at，同一份报告只认一次，挡掉重放）。没有比对过的
 //    候选一律不落库，堵死「跳过报告直接写」这条绕过路径。
 // 3. apply 只重放 dryRun 校验过的那份规范化快照，且只认快照里的索引：被 dryRun
-//    跳过的候选没有资格落库；payload 级 scope 也随快照一起走，不会出现「报告按
-//    scope A 比对、落地却写成全局」的错位。
+//    跳过的候选没有资格落库；scope 比对按**候选自己的** scope（candidate ?? payload），
+//    不会出现「报告按 scope A 比对、落地却写成 scope B」的错位。
+// 3b. archive 只认报告里命中过的 id（item.match.id，落在报告的 decisions 列）：报告
+//    是唯一的判断依据，整理接口不能变成第二条「按 id 改库」的通道。
 // 4. 筛除 = 归档（store.setArchived），绝不物理删除：归档可恢复，删除不可逆。
 //
 // 宽容形态（仓库红线 4，同 issue #89）只管**输入**：单条非法候选/决策跳过 + 应用
@@ -133,30 +136,40 @@ export function createOrganizer({ store, embedQuery, saveWithDedupe, transaction
     const snapshot = accepted.map(({ index, candidate }) => ({ index, ...candidate }));
 
     // scope 同等才比对（跨 scope 永不互判——防泄漏，与 saveWithDedupe 的去重键
-    // 「type+title+scope」同口径）。行扫描与向量读取按 type 缓存：一批候选通常
-    // 同类型，避免逐条全表扫。
-    const scopeMatches = (m) =>
-      scopeKeyOf(m.agent_scope) === scopeKeyOf(payload?.agent_scope) &&
-      scopeKeyOf(m.workspace_scope) === scopeKeyOf(payload?.workspace_scope) &&
-      scopeKeyOf(m.sensitivity) === scopeKeyOf(payload?.sensitivity);
-    const rowsByType = new Map();
-    const rowsFor = (type) => {
-      if (!rowsByType.has(type)) {
-        rowsByType.set(type, store.list({ type, limit: null }).filter((m) => !m.archived && scopeMatches(m)));
+    // 「type+title+scope」同口径）。**按候选自己的 scope 比，不按载荷级**：
+    // normalizeCandidate 允许逐条给 scope（raw ?? payload），若这里只看 payload，
+    // 一条 agent_scope:"agent-b" 的候选就会拿默认 scope 的行去比——同一个 scope 里
+    // 明明已有同标题行也报 "new"，报告 scope 与写入 scope 就此错位（硬规则 3）。
+    // 行扫描与向量读取都按 (type, scope) 缓存：一批候选通常同类型同 scope，避免逐条全表扫。
+    const scopeOf = (source) => SCOPE_KEYS.map((k) => scopeKeyOf(source?.[k])).join("\u0000");
+    const scopeMatches = (m, source) => SCOPE_KEYS.every((k) => scopeKeyOf(m[k]) === scopeKeyOf(source?.[k]));
+    const cacheKey = (candidate) => `${candidate.type}\u0000${scopeOf(candidate)}`;
+    const rowsByScope = new Map();
+    const rowsFor = (candidate) => {
+      const key = cacheKey(candidate);
+      if (!rowsByScope.has(key)) {
+        rowsByScope.set(
+          key,
+          store.list({ type: candidate.type, limit: null }).filter((m) => !m.archived && scopeMatches(m, candidate))
+        );
       }
-      return rowsByType.get(type);
+      return rowsByScope.get(key);
     };
-    const vecsByType = new Map();
-    const vecsFor = (type, rows) => {
-      if (!vecsByType.has(type)) {
-        vecsByType.set(type, store.getEmbeddings(rows.slice(0, CANDIDATE_LIMIT).map((m) => m.id)));
+    const vecsByScope = new Map();
+    const vecsFor = (candidate, rows) => {
+      const key = cacheKey(candidate);
+      if (!vecsByScope.has(key)) {
+        vecsByScope.set(key, store.getEmbeddings(rows.slice(0, CANDIDATE_LIMIT).map((m) => m.id)));
       }
-      return vecsByType.get(type);
+      return vecsByScope.get(key);
     };
 
     const runId = randomUUID();
     const createdAt = new Date().toISOString();
-    const snapshotHash = hashOf(bounded);
+    // 哈希与 input 必须指向同一份东西：审计存的是规范化快照（apply 要重放它），
+    // 所以哈希也算快照——否则回执里的 snapshot_hash 描述的是调用方原始输入，
+    // 谁也校验不了。
+    const snapshotHash = hashOf(snapshot);
     const record = (status, { error = null, decisions = items, skipped: skipList = skipped, applied = 0 } = {}) =>
       store.saveDreamRun({
         id: runId,
@@ -166,12 +179,12 @@ export function createOrganizer({ store, embedQuery, saveWithDedupe, transaction
         provider: null,
         model: null,
         snapshot_hash: snapshotHash,
-        input_count: bounded.length,
+        input_count: snapshot.length,
         input: snapshot,
         decisions,
         applied,
         summary_stored: 0,
-        receipt: buildReceipt({ runId, status, snapshotHash, inputCount: bounded.length, applied, summaryStored: false }),
+        receipt: buildReceipt({ runId, status, snapshotHash, inputCount: snapshot.length, applied, summaryStored: false }),
         policy_epoch: 0,
         run_type: "organize",
         ...(skipList.length ? { skipped: skipList } : {})
@@ -180,13 +193,13 @@ export function createOrganizer({ store, embedQuery, saveWithDedupe, transaction
     const items = [];
     try {
       for (const { index, candidate } of accepted) {
-        const rows = rowsFor(candidate.type);
+        const rows = rowsFor(candidate);
         let item = { index, type: candidate.type, title: candidate.title, verdict: "new", match: null };
         const exact = rows.find((m) => normalizeTitle(m.title) === normalizeTitle(candidate.title));
         if (exact) {
           item = { ...item, verdict: "exact", match: { id: exact.id, title: exact.title, sim: null } };
         } else {
-          const near = await bestNear(candidate, rows, vecsFor(candidate.type, rows));
+          const near = await bestNear(candidate, rows, vecsFor(candidate, rows));
           if (near) {
             item = { ...item, verdict: "near", match: { id: near.memory.id, title: near.memory.title, sim: near.sim } };
           }
@@ -224,7 +237,9 @@ export function createOrganizer({ store, embedQuery, saveWithDedupe, transaction
    *   处理（#170 复核项 4：无存在性泄漏），与 document 的 hiddenEvidenceIds 同形：
    *   **可见性由可信调用方算好传入**（tools 层先例：register_document），不取 payload
    *   里的字段——那是调用方可自选的内容，不是授权。
-   * @returns {{run_id, dry_run_id, status, saved, discarded, archived, memory_ids, skipped, degraded}}
+   * @returns {{run_id, dry_run_id, status, saved, merged, discarded, archived, memory_ids, skipped, degraded}}
+   *   `saved` 只数**新建**的行，合并进既有行的算 `merged`（两者之和 = 落地生效的条数）；
+   *   `memory_ids` 含合并命中的既有行 id（它们同样需要重嵌入）。
    */
   function apply(payload = {}, { hiddenIds = [] } = {}) {
     const dryRunId = String(payload?.run_id ?? "").trim();
@@ -244,17 +259,33 @@ export function createOrganizer({ store, embedQuery, saveWithDedupe, transaction
     if (report.status === "failed") {
       throw new Error(`organize.apply: dryRun "${dryRunId}" failed — re-run dryRun before applying`);
     }
+    // 同一份报告只能落地一次。凭证写在**报告行**上（下面的 outcome.applied_at），
+    // 与数据同事务；只看 apply 回执挡不住「重放同一 run_id」——那会各记一份收据，
+    // 审计计数虚高，破坏「全留审计」的承诺。
+    if (report.outcome?.applied_at) {
+      throw new Error(`organize.apply: dryRun "${dryRunId}" was already applied at ${report.outcome.applied_at}`);
+    }
     const decisions = Array.isArray(payload?.decisions) ? payload.decisions : null;
     if (!decisions) throw new Error("organize.apply: decisions must be an array");
 
     const snapshot = Array.isArray(report.input) ? report.input : [];
     const byIndex = new Map(snapshot.map((entry) => [Number(entry?.index), entry]));
     const hidden = new Set((Array.isArray(hiddenIds) ? hiddenIds : []).map((id) => String(id)));
+    // 报告认定过的「库内被取代行」：dryRun 的 items 落在报告的 decisions 列里，
+    // 只有那里命中过的 id 才有资格归档。不查这一条，apply 可以归档报告里根本
+    // 没出现过的行（评审实测：preference-only 的报告里归档了 project 行）——
+    // 整理接口就成了绕过报告的第二条改库通道。
+    const matchedIds = new Set(
+      (Array.isArray(report.decisions) ? report.decisions : [])
+        .map((d) => (d?.match?.id != null ? String(d.match.id) : null))
+        .filter(Boolean)
+    );
     const skipped = [];
     const byId = {};
     const memoryIds = [];
     const savedRows = [];
-    let saved = 0;
+    let saved = 0; // 真正新建的行
+    let merged = 0; // 合并进既有行（同键命中）——不是新建，不能算进 saved
     let discarded = 0;
     let archived = 0;
 
@@ -274,7 +305,8 @@ export function createOrganizer({ store, embedQuery, saveWithDedupe, transaction
           // 来的只能是基础设施错误 → 让它冒到事务外，整批回滚 + failed（红线 4 的
           // 「单条跳过」只覆盖输入级错误，那一步在 normalizeCandidate）。
           const result = saveWithDedupe(candidate);
-          saved++;
+          if (result?.action === "created") saved++;
+          else merged++;
           savedRows.push(result.memory);
           memoryIds.push(result.memory.id);
           byId[result.memory.id] = action;
@@ -286,9 +318,16 @@ export function createOrganizer({ store, embedQuery, saveWithDedupe, transaction
         }
         if (action === "archive") {
           const id = String(decision?.id ?? "").trim();
+          // 可见性先于「是否被报告命中」：调用方看不见的行一律按不存在处理（不泄漏
+          // 存在性，错误文案也维持「unknown, archived or out of scope」这一句）。
           const row = !id || hidden.has(id) ? null : store.getById(id);
           if (!row) {
             skipped.push({ index: i, action, ids: id ? [id] : [], error: "unknown, archived or out of scope" });
+            return;
+          }
+          // 看得见、也存在，但报告从没把它标成命中行 → 拒绝：报告是唯一的判断依据。
+          if (!matchedIds.has(id)) {
+            skipped.push({ index: i, action, ids: [id], error: "id was not flagged as a match by this dryRun" });
             return;
           }
           if (row.archived) {
@@ -309,7 +348,7 @@ export function createOrganizer({ store, embedQuery, saveWithDedupe, transaction
     const snapshotHash = report.snapshot_hash;
     // 回执的 applied/byId 由调用方传入：失败路径必须报 0（事务已回滚，累积的
     // saved/archived 是尝试值，写进回执就是撒谎）。
-    const record = (status, error, { byId: outcomeById = byId, applied = saved + archived } = {}) => store.saveDreamRun({
+    const record = (status, error, { byId: outcomeById = byId, applied = saved + merged + archived } = {}) => store.saveDreamRun({
       id: applyRunId,
       created_at: createdAt,
       status,
@@ -342,15 +381,26 @@ export function createOrganizer({ store, embedQuery, saveWithDedupe, transaction
     try {
       transaction(() => {
         runDecisions();
+        // 给报告打「已落地」标记，与数据同事务：标记写不进去就整批回滚，不会出现
+        // 「库改了、报告却还能再落地一次」的窗口。
+        store.saveDreamRun({
+          ...report,
+          outcome: { ...(report.outcome ?? {}), applied_at: createdAt, applied_by: applyRunId }
+        });
         // 只有 discard 的批次什么都没改 → noop（绝不虚报 ok）。
-        status = skipped.length ? "degraded" : saved + archived > 0 ? "ok" : "noop";
+        status = skipped.length ? "degraded" : saved + merged + archived > 0 ? "ok" : "noop";
         // 成功回执与数据同事务：审计写不进去就一起回滚，不留「库改了却没有回执」
         // 的窗口（回执是这条链上唯一的证据）。
         record(status, null);
       });
     } catch (e) {
-      // 事务已回滚 → 失败回执单独写（它本身失败就让它抛，不掩盖原始错误）。
-      record("failed", String(e?.message ?? e), { byId: {}, applied: 0 });
+      // 事务已回滚 → 失败回执单独写。审计本身失败不能顶掉原始错误（调用方要处理的
+      // 是原始错误那一件），但也别静默：挂到它身上，两件事都看得见。
+      try {
+        record("failed", String(e?.message ?? e), { byId: {}, applied: 0 });
+      } catch (auditError) {
+        e.audit_error = String(auditError?.message ?? auditError);
+      }
       throw e;
     }
 
@@ -364,6 +414,7 @@ export function createOrganizer({ store, embedQuery, saveWithDedupe, transaction
       dry_run_id: dryRunId,
       status,
       saved,
+      merged,
       discarded,
       archived,
       memory_ids: memoryIds,
