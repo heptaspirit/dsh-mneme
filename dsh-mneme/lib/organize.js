@@ -320,6 +320,14 @@ export function createOrganizer({ store, embedQuery, saveWithDedupe, transaction
           return;
         }
         if (action === "discard") {
+          // 与 save 同一把尺：index 必须指向 dryRun 真的收下的候选。否则这是一条针对
+          // 不存在的候选的「裁决」，记进回执就是虚账（skipped 为空、可能还报 noop）。
+          const index = Number(decision?.index);
+          const entry = Number.isInteger(index) ? byIndex.get(index) : undefined;
+          if (!entry) {
+            skipped.push({ index: i, action, error: "candidate index was not accepted by this dryRun" });
+            return;
+          }
           discarded++;
           return;
         }

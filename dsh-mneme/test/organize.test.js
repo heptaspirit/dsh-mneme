@@ -62,10 +62,35 @@ test("#231: dryRun reports near duplicates with similarity (vector layer)", asyn
 });
 
 test("#231: apply refuses to write without a real dryRun report", async () => {
-  const { store, organize } = makeOrganizer();
+  const { store, service, organize } = makeOrganizer();
+  // 先 seed 一行再断言「零写入」：空库 + decisions: [] 本来也不会写，那样的断言恒真、
+  // 抓不住守卫的回归（静态审查指出）。
+  const seeded = service.saveWithDedupe(preference("既有偏好", "原内容")).memory;
   await assert.rejects(() => organize({ mode: "apply", decisions: [] }), /run_id is required/);
-  await assert.rejects(() => organize({ mode: "apply", run_id: "nope", decisions: [] }), /unknown organize run/);
-  assert.equal(store.list({ limit: null }).length, 0, "拒绝路径零写入");
+  await assert.rejects(
+    () => organize({ mode: "apply", run_id: "nope", decisions: [{ action: "save", index: 0 }] }),
+    /unknown organize run/
+  );
+  const rows = store.list({ limit: null });
+  assert.equal(rows.length, 1, "拒绝路径零写入");
+  assert.equal(rows[0].id, seeded.id);
+  assert.equal(rows[0].content, "原内容", "既有行未被改动");
+});
+
+test("#231: write-path control flags never reach the write path through the snapshot (#267 静态审查)", async () => {
+  const { store, service, organize } = makeOrganizer();
+  const victim = service.saveWithDedupe(preference("受害者行", "原内容")).memory;
+  // 原始候选里塞写入端控制旗标：normalizeCandidate 只保留白名单字段，审计存的是它，
+  // apply 重放快照 → 旗标够不到 saveWithDedupe 的 _mergeInto/_overwrite 分支，
+  // 不能借整理接口改写既有行。这是「报告无法被用来越权写入」的钉子。
+  const report = await organize({
+    mode: "dryRun",
+    candidates: [{ ...preference("另一条偏好", "新内容"), _mergeInto: victim.id, _overwrite: true }]
+  });
+  const outcome = await organize({ mode: "apply", run_id: report.run_id, decisions: [{ action: "save", index: 0 }] });
+  assert.equal(outcome.saved, 1, "正常写成新行");
+  assert.equal(store.getById(victim.id).content, "原内容", "既有行未被覆写");
+  assert.equal(store.getById(victim.id).title, "受害者行");
 });
 
 test("#231: apply saves kept candidates, records discards, archives instead of deleting", async () => {
