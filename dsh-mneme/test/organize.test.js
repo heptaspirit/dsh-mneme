@@ -106,6 +106,27 @@ test("#231: apply saves kept candidates, records discards, archives instead of d
   assert.equal(parseReceipt(applyRun.receipt).status, "ok");
 });
 
+test("#231: the source columns do not split the match key (#267 评审第二轮)", async () => {
+  const { store, service, organize } = makeOrganizer();
+  const seeded = service.saveWithDedupe({
+    ...preference("同标题的约束"),
+    agent_scope: "agent-b",
+    agent_scope_source: "auto"
+  }).memory;
+  // 只差 agent_scope_source（auto vs explicit）：saveWithDedupe 的去重键不含来源两列，
+  // 所以这必须判成「命中既有行」。比对键里多带来源就会报 new，而 apply 却合并——错位。
+  const report = await organize({
+    mode: "dryRun",
+    candidates: [{ ...preference("同标题的约束"), agent_scope: "agent-b", agent_scope_source: "explicit" }]
+  });
+  assert.equal(report.items[0].verdict, "exact");
+  assert.equal(report.items[0].match.id, seeded.id);
+  const outcome = await organize({ mode: "apply", run_id: report.run_id, decisions: [{ action: "save", index: 0 }] });
+  assert.equal(outcome.merged, 1, "报告与写入同口径：命中既有行");
+  assert.equal(outcome.saved, 0);
+  assert.equal(store.list({ limit: null }).length, 1);
+});
+
 test("#231: dryRun compares in the candidate's own scope, not the payload's (#267 评审 1)", async () => {
   const { service, organize } = makeOrganizer();
   const seeded = service.saveWithDedupe({ ...preference("同标题的约束"), agent_scope: "agent-b" }).memory;

@@ -44,6 +44,11 @@ const MAX_ITEMS = 50;
 // scope 治理的写入通道。载荷级给的值是候选级的缺省——比对按它判 scope，落地就必须
 // 带上它，否则报告与写入落在两个 scope 里。
 const SCOPE_KEYS = ["sensitivity", "agent_scope", "workspace_scope", "agent_scope_source", "workspace_scope_source"];
+// 比对键必须与 saveWithDedupe 的去重键**同口径**：`src/service.js` 的 scopeMatches 只比
+// sensitivity / agent_scope / workspace_scope 三列，来源两列不进键（它们是元数据，合并时
+// 还会把被并入行的 auto 来源升级成 explicit）。比对键里多带来源，就会出现「dryRun 报 new、
+// apply 却把它并进既有行」——报告与写入错位，正是本模块硬规则 3 要挡的那类不一致。
+const MATCH_SCOPE_KEYS = ["sensitivity", "agent_scope", "workspace_scope"];
 
 /**
  * Build the organizer.
@@ -141,8 +146,10 @@ export function createOrganizer({ store, embedQuery, saveWithDedupe, transaction
     // 一条 agent_scope:"agent-b" 的候选就会拿默认 scope 的行去比——同一个 scope 里
     // 明明已有同标题行也报 "new"，报告 scope 与写入 scope 就此错位（硬规则 3）。
     // 行扫描与向量读取都按 (type, scope) 缓存：一批候选通常同类型同 scope，避免逐条全表扫。
-    const scopeOf = (source) => SCOPE_KEYS.map((k) => scopeKeyOf(source?.[k])).join("\u0000");
-    const scopeMatches = (m, source) => SCOPE_KEYS.every((k) => scopeKeyOf(m[k]) === scopeKeyOf(source?.[k]));
+    // 比对键用 MATCH_SCOPE_KEYS（三列值），搬运用 SCOPE_KEYS（五列）——两件事，别混：
+    // 「怎么判同一行」跟 write 路径一致，「怎么把 scope 搬到候选上」才需要连来源一起带。
+    const scopeOf = (source) => MATCH_SCOPE_KEYS.map((k) => scopeKeyOf(source?.[k])).join("\u0000");
+    const scopeMatches = (m, source) => MATCH_SCOPE_KEYS.every((k) => scopeKeyOf(m[k]) === scopeKeyOf(source?.[k]));
     const cacheKey = (candidate) => `${candidate.type}\u0000${scopeOf(candidate)}`;
     const rowsByScope = new Map();
     const rowsFor = (candidate) => {
